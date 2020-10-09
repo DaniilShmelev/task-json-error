@@ -1,6 +1,6 @@
 {
-  "id": "6f8c69a5-b023-428e-a125-fccf4efcb929",
-  "name": "FtpUpload",
+  "id": "ccc2bf44-513c-4f99-9903-86072a28975a",
+  "name": "FtpUploadModified",
   "friendlyName": "ms-resource:loc.friendlyName",
   "description": "ms-resource:loc.description",
   "author": "Microsoft Corporation",
@@ -159,6 +159,15 @@
       "groupName": "advanced"
     },
     {
+      "name": "shouldFailIfNoFilesFound",
+      "type": "boolean",
+      "label": "ms-resource:loc.input.label.shouldFailIfNoFilesFound",
+      "defaultValue": "false",
+      "required": false,
+      "helpMarkDown": "ms-resource:loc.input.help.shouldFailIfNoFilesFound",
+      "groupName": "advanced"
+    },
+    {
       "name": "customCmds",
       "type": "multiLine",
       "label": "ms-resource:loc.input.label.customCmds",
@@ -173,7 +182,7 @@
     }
   ],
   "execution": {
-    "Node10": {
+    "Node": {
       "target": "ftpuploadtask.js",
       "argumentFormat": ""
     }
