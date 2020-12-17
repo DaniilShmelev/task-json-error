@@ -2,6 +2,7 @@
 import Q = require('q');
 import os = require('os');
 import path = require('path');
+import fs = require('fs');
 
 import * as tl from 'azure-pipelines-task-lib/task';
 import {ToolRunner} from 'azure-pipelines-task-lib/toolrunner';
@@ -29,6 +30,7 @@ var publishJUnitResults: string = tl.getInput('publishJUnitResults');
 var testResultsFiles: string = tl.getInput('testResultsFiles', true);
 var ccTool = tl.getInput('codeCoverageTool');
 var authenticateFeed = tl.getBoolInput('mavenFeedAuthenticate', true);
+var skipEffectivePomGeneration = tl.getBoolInput("skipEffectivePom", false);
 var isCodeCoverageOpted = (typeof ccTool != "undefined" && ccTool && ccTool.toLowerCase() != 'none');
 var failIfCoverageEmptySetting: boolean = tl.getBoolInput('failIfCoverageEmpty');
 var codeCoverageFailed: boolean = false;
@@ -46,6 +48,7 @@ var codeAnalysisOrchestrator:CodeAnalysisOrchestrator = new CodeAnalysisOrchestr
 
 // Determine the version and path of Maven to use
 var mvnExec: string = '';
+
 if (mavenVersionSelection == 'Path') {
     // The path to Maven has been explicitly specified
     tl.debug('Using Maven path from user input');
@@ -88,8 +91,8 @@ if (isWindows &&
     }
 }
 
-tl.debug('Maven executable: ' + mvnExec);
 tl.checkPath(mvnExec, 'maven path');
+tl.debug('Maven executable: ' + mvnExec);
 
 // Set JAVA_HOME to the JDK version (default, 1.7, 1.8, etc.) or the path specified by the user
 var specifiedJavaHome: string = null;
@@ -149,14 +152,23 @@ async function execBuild() {
         .then(function (code) {
             // Setup tool runner to execute Maven goals
             if (authenticateFeed) {
-                var mvnRun = tl.tool(mvnExec);
-                mvnRun.arg('-f');
-                mvnRun.arg(mavenPOMFile);
-                mvnRun.arg('help:effective-pom');
-                if(mavenOptions) {
-                    mvnRun.line(mavenOptions);
+                var repositories;
+
+                if (skipEffectivePomGeneration)
+                {
+                    var pomContents = fs.readFileSync(mavenPOMFile, "utf8");
+                    repositories = util.collectFeedRepositories(pomContents);
+                } else {
+                    var mvnRun = tl.tool(mvnExec);
+                    mvnRun.arg('-f');
+                    mvnRun.arg(mavenPOMFile);
+                    mvnRun.arg('help:effective-pom');
+                    if(mavenOptions) {
+                        mvnRun.line(mavenOptions);
+                    }
+                    repositories = util.collectFeedRepositoriesFromEffectivePom( mvnRun.execSync()['stdout']);
                 }
-                return util.collectFeedRepositoriesFromEffectivePom(mvnRun.execSync()['stdout'])
+                return repositories
                 .then(function (repositories) {
                     if (!repositories || !repositories.length) {
                         tl.debug('No built-in repositories were found in pom.xml');
@@ -339,7 +351,7 @@ function publishJUnitTestResults(testResultsFiles: string) {
     }
 
     if (!matchingJUnitResultFiles || matchingJUnitResultFiles.length == 0) {
-        tl.warning('No test result files matching ' + testResultsFiles + ' were found, so publishing JUnit test results is being skipped.');
+        console.log(tl.loc('NoTestResults',testResultsFiles));
         return 0;
     }
 
