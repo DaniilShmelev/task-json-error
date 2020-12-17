@@ -2,17 +2,14 @@ import Q = require('q');
 import os = require('os');
 import path = require('path');
 import fs = require('fs');
-import tl = require('vsts-task-lib/task');
-import tr = require('vsts-task-lib/toolrunner');
-import locationHelpers = require("nuget-task-common/LocationHelpers"); // TODO: refactor
-import systemToken = require('utility-common/accesstoken');
+import * as tl from 'azure-pipelines-task-lib/task';
+import * as tr from 'azure-pipelines-task-lib/toolrunner';
+import * as pkgLocationUtils from "packaging-common/locationUtilities";
+import { logError } from 'packaging-common/util';
 
 import * as url from "url";
-import * as str from 'string';
 import * as xml2js from 'xml2js';
 import * as fse from 'fs-extra';
-import * as cheerio from 'cheerio';
-import * as vsts from "vso-node-api/WebApi";
 
 let stripbom = require('strip-bom');
 let base64 = require('base-64');
@@ -20,9 +17,6 @@ let utf8 = require('utf8');
 let uuidV4 = require("uuid/v4");
 
 const accessTokenEnvSetting: string = 'ENV_MAVEN_ACCESS_TOKEN';
-const ApiVersion = "3.0-preview.1";
-const PackagingAreaName: string = "maven";
-const PackageAreaId: string = "F285A171-0DF5-4C49-AAF2-17D0D37D9F0E";
 
 function readXmlFileAsJson(filePath: string): Q.Promise<any> {
     return readFile(filePath, 'utf-8')
@@ -33,7 +27,7 @@ function readFile(filePath: string, encoding: string): Q.Promise<string> {
     return Q.nfcall<string>(fs.readFile, filePath, encoding);
 }
 
-function convertXmlStringToJson(xmlContent: string): Q.Promise<any> {
+async function convertXmlStringToJson(xmlContent: string): Promise<any> {
     return Q.nfcall<any>(xml2js.parseString, stripbom(xmlContent));
 }
 
@@ -44,7 +38,7 @@ function writeJsonAsXmlFile(filePath: string, jsonContent: any, rootName:string)
         rootName: rootName
     });
     let xml = builder.buildObject(jsonContent);
-    xml = str(xml).replaceAll('&#xD;', '').s;
+    xml = xml.replace(/&#xD;/g, "");
     return writeFile(filePath, xml);
 }
 
@@ -171,7 +165,7 @@ export function mergeCredentialsIntoSettingsXml(settingsXmlFile:string, reposito
 }
 
 function getAuthenticationToken() {
-    return base64.encode(utf8.encode('VSTS:' + systemToken.getSystemAccessToken()));
+    return base64.encode(utf8.encode('VSTS:' + pkgLocationUtils.getSystemAccessToken()));
 }
 
 function insertRepoJsonIntoPomJson(pomJson:any, repoJson:any) {
@@ -194,64 +188,76 @@ interface RepositoryInfo {
     id:string;
 }
 
-function collectFeedRepositories(pomContents:string): Q.Promise<any> {
-    return convertXmlStringToJson(pomContents).then(function (pomJson) {
-        let repos:RepositoryInfo[] = [];
-        if (!pomJson) {
-            tl.debug('Incomplete pom: ' + pomJson);
-            return Q.resolve(repos);
-        }
-        let collectionUrl = tl.getVariable("System.TeamFoundationCollectionUri");
-        return locationHelpers.assumeNuGetUriPrefixes(collectionUrl).then(function (packageUrl) {
-            tl.debug('collectionUrl=' + collectionUrl);
-            tl.debug('packageUrl=' + packageUrl);
-            let collectionHostname:string = url.parse(collectionUrl).hostname.toLowerCase();
-            let packageHostname:string = packageUrl[1];
-            if (packageHostname) {
-                url.parse(packageHostname).hostname.toLowerCase();
-            } else {
-                packageHostname = collectionHostname;
-            }
-            let parseRepos:(project) => void = function(project) {
-                if (project && project.repositories) {
-                    for (let r of project.repositories) {
-                        r = r instanceof Array ? r[0] : r;
-                        if (r.repository) {
-                            for (let repo of r.repository) {
-                                repo = repo instanceof Array ? repo[0] : repo;
-                                let url:string = repo.url instanceof Array ? repo.url[0] : repo.url;
-                                if (url && (url.toLowerCase().includes(collectionHostname) ||
-                                            url.toLowerCase().includes(packageHostname))) {
-                                tl.debug('using credentials for url: ' + url);
-                                repos.push({
-                                    id: (repo.id && repo.id instanceof Array)
-                                        ? repo.id[0]
-                                        : repo.id
-                                    });
-                                }
-                            }
+async function collectFeedRepositories(pomContents:string): Promise<any> {
+    let pomJson = await convertXmlStringToJson(pomContents);
+    let repos:RepositoryInfo[] = [];
+    if (!pomJson) {
+        tl.debug('Incomplete pom: ' + pomJson);
+        return Promise.resolve(repos);
+    }
+    const collectionUrl = tl.getVariable("System.TeamFoundationCollectionUri");
+    let packagingLocation: pkgLocationUtils.PackagingLocation;
+    try {
+        packagingLocation = await pkgLocationUtils.getPackagingUris(pkgLocationUtils.ProtocolType.Maven);
+    } catch (error) {
+        tl.debug("Unable to get packaging URIs");
+        logError(error);
+        throw error;
+    }
+
+    let packageUrl = packagingLocation.DefaultPackagingUri;
+    tl.debug('collectionUrl=' + collectionUrl);
+    tl.debug('packageUrl=' + packageUrl);
+    let collectionName:string = url.parse(collectionUrl).hostname.toLowerCase();
+    let collectionPathName = url.parse(collectionUrl).pathname;
+    if(collectionPathName && collectionPathName.length > 1) {
+        collectionName = collectionName + collectionPathName.toLowerCase();
+        tl.debug('collectionName=' + collectionName);
+    }
+    if (packageUrl) {
+        url.parse(packageUrl).hostname.toLowerCase();
+    } else {
+        packageUrl = collectionName;
+    }
+    let parseRepos:(project) => void = function(project) {
+        if (project && project.repositories) {
+            for (let r of project.repositories) {
+                r = r instanceof Array ? r[0] : r;
+                if (r.repository) {
+                    for (let repo of r.repository) {
+                        repo = repo instanceof Array ? repo[0] : repo;
+                        let url:string = repo.url instanceof Array ? repo.url[0] : repo.url;
+                        if (url && (url.toLowerCase().includes(collectionName) ||
+                                    url.toLowerCase().includes(packageUrl) ||
+                                    packagingLocation.PackagingUris.some(uri => url.toLowerCase().startsWith(uri.toLowerCase())))) {
+                        tl.debug('using credentials for url: ' + url);
+                        repos.push({
+                            id: (repo.id && repo.id instanceof Array)
+                                ? repo.id[0]
+                                : repo.id
+                            });
                         }
                     }
                 }
-            };
-
-            if (pomJson.projects && pomJson.projects.project) {
-                for (let project of pomJson.projects.project) {
-                    parseRepos(project);
-                }
-            } else if (pomJson.project) {
-                parseRepos(pomJson.project);
-            } else {
-                tl.warning(tl.loc('EffectivePomInvalid'));
             }
+        }
+    };
 
-            tl.debug('Feeds found: ' + JSON.stringify(repos));
-            return Q.resolve(repos);
-        });
-    });
+    if (pomJson.projects && pomJson.projects.project) {
+        for (let project of pomJson.projects.project) {
+            parseRepos(project);
+        }
+    } else if (pomJson.project) {
+        parseRepos(pomJson.project);
+    } else {
+        tl.warning(tl.loc('EffectivePomInvalid'));
+    }
+
+    tl.debug('Feeds found: ' + JSON.stringify(repos));
+    return Promise.resolve(repos);
 }
 
-export function collectFeedRepositoriesFromEffectivePom(mavenOutput:string): Q.Promise<any> {
+export function collectFeedRepositoriesFromEffectivePom(mavenOutput:string): Promise<any> {
     tl.debug('collecting account feeds from effective pom');
     const effectivePomStartTag:string = '<!-- Effective POM';
     const projectsBeginTag:string = '<projects';
@@ -263,7 +269,7 @@ export function collectFeedRepositoriesFromEffectivePom(mavenOutput:string): Q.P
     let effectivePomStart:number = xml.lastIndexOf(effectivePomStartTag);
     if (effectivePomStart === -1) {
         tl.warning(tl.loc('EffectivePomInvalid'));
-        return Q.resolve(true);
+        return Promise.resolve(true);
     }
 
     let xmlStart:number = xml.indexOf(projectsBeginTag, effectivePomStart);
@@ -281,7 +287,7 @@ export function collectFeedRepositoriesFromEffectivePom(mavenOutput:string): Q.P
     }
 
     tl.warning(tl.loc('EffectivePomInvalid'));
-    return Q.resolve(true);
+    return Promise.resolve(true);
 }
 
 export function getExecOptions(): tr.IExecOptions {
@@ -293,7 +299,7 @@ export function getExecOptions(): tr.IExecOptions {
 }
 
 export function publishMavenInfo(mavenInfo: string) {
-    const stagingDir: string = path.join(os.tmpdir(), '.mavenInfo');
+    const stagingDir: string = path.join(tl.getVariable('Agent.TempDirectory'), '.mavenInfo');
     const randomString: string = uuidV4();
     const infoFilePath: string = path.join(stagingDir, 'MavenInfo-' + randomString + '.md');
     if (!tl.exist(stagingDir)) {

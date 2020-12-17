@@ -2,19 +2,19 @@
 import Q = require('q');
 import os = require('os');
 import path = require('path');
-import fs = require('fs');
 
-import tl = require('vsts-task-lib/task');
-import {ToolRunner} from 'vsts-task-lib/toolrunner';
-import {CodeCoverageEnablerFactory} from 'codecoverage-tools/codecoveragefactory';
-import {CodeAnalysisOrchestrator} from "codeanalysis-common/Common/CodeAnalysisOrchestrator";
-import {BuildOutput, BuildEngine} from 'codeanalysis-common/Common/BuildOutput';
-import {CheckstyleTool} from 'codeanalysis-common/Common/CheckstyleTool';
-import {PmdTool} from 'codeanalysis-common/Common/PmdTool';
-import {FindbugsTool} from 'codeanalysis-common/Common/FindbugsTool';
-import javacommons = require('java-common/java-common');
+import * as tl from 'azure-pipelines-task-lib/task';
+import {ToolRunner} from 'azure-pipelines-task-lib/toolrunner';
+import {CodeCoverageEnablerFactory} from 'azure-pipelines-tasks-codecoverage-tools/codecoveragefactory';
+import {CodeAnalysisOrchestrator} from "azure-pipelines-tasks-codeanalysis-common/Common/CodeAnalysisOrchestrator";
+import {BuildOutput, BuildEngine} from 'azure-pipelines-tasks-codeanalysis-common/Common/BuildOutput';
+import {CheckstyleTool} from 'azure-pipelines-tasks-codeanalysis-common/Common/CheckstyleTool';
+import {PmdTool} from 'azure-pipelines-tasks-codeanalysis-common/Common/PmdTool';
+import {FindbugsTool} from 'azure-pipelines-tasks-codeanalysis-common/Common/FindbugsTool';
+import javacommons = require('azure-pipelines-tasks-java-common/java-common');
 import util = require('./mavenutil');
 
+const TESTRUN_SYSTEM = "VSTS - maven"; 
 var isWindows = os.type().match(/^Win/);
 
 // Set up localization resource file
@@ -46,7 +46,6 @@ var codeAnalysisOrchestrator:CodeAnalysisOrchestrator = new CodeAnalysisOrchestr
 
 // Determine the version and path of Maven to use
 var mvnExec: string = '';
-
 if (mavenVersionSelection == 'Path') {
     // The path to Maven has been explicitly specified
     tl.debug('Using Maven path from user input');
@@ -90,6 +89,7 @@ if (isWindows &&
 }
 
 tl.debug('Maven executable: ' + mvnExec);
+tl.checkPath(mvnExec, 'maven path');
 
 // Set JAVA_HOME to the JDK version (default, 1.7, 1.8, etc.) or the path specified by the user
 var specifiedJavaHome: string = null;
@@ -193,7 +193,7 @@ async function execBuild() {
                     }
                     return util.mergeCredentialsIntoSettingsXml(settingsXmlFile, repositories);
                 })
-                .fail(function (err) {
+                .catch(function (err) {
                     return Q.reject(err);
                 });
             } else {
@@ -283,6 +283,8 @@ async function execBuild() {
 }
 
 function applySonarQubeArgs(mvnsq: ToolRunner | any, execFileJacoco?: string): ToolRunner | any {
+    const isJacocoCoverageReportXML: boolean = tl.getBoolInput('isJacocoCoverageReportXML', false);
+
     if (!tl.getBoolInput('sqAnalysisEnabled', false)) {
         return mvnsq;
     }
@@ -290,6 +292,10 @@ function applySonarQubeArgs(mvnsq: ToolRunner | any, execFileJacoco?: string): T
     // Apply argument for the JaCoCo tool, if enabled
     if (typeof execFileJacoco != "undefined" && execFileJacoco) {
         mvnsq.arg('-Dsonar.jacoco.reportPaths=' + execFileJacoco);
+    }
+
+    if (isJacocoCoverageReportXML && summaryFile) {
+        mvnsq.arg(`-Dsonar.coverage.jacoco.xmlReportPaths=${summaryFile}`);
     }
 
     switch (tl.getInput('sqMavenPluginVersionChoice')) {
@@ -323,8 +329,7 @@ function publishJUnitTestResults(testResultsFiles: string) {
         tl.debug('Pattern found in testResultsFiles parameter');
         var buildFolder = tl.getVariable('System.DefaultWorkingDirectory');
         tl.debug(`buildFolder=${buildFolder}`);
-        var allFiles = tl.find(buildFolder);
-        matchingJUnitResultFiles = tl.match(allFiles, testResultsFiles, {
+        matchingJUnitResultFiles = tl.findMatch(buildFolder, testResultsFiles, null, {
             matchBase: true
         });
     }
@@ -339,7 +344,8 @@ function publishJUnitTestResults(testResultsFiles: string) {
     }
 
     var tp = new tl.TestPublisher("JUnit");
-    tp.publish(matchingJUnitResultFiles, true, "", "", "", true);
+    const testRunTitle = tl.getInput('testRunTitle');
+    tp.publish(matchingJUnitResultFiles, true, "", "", testRunTitle, true, TESTRUN_SYSTEM);
 }
 
 function execEnableCodeCoverage(): Q.Promise<string> {
@@ -385,9 +391,9 @@ function enableCodeCoverage() : Q.Promise<any> {
     }
 
     // clean any previously generated files.
-    tl.rmRF(targetDirectory, true);
-    tl.rmRF(reportDirectory, true);
-    tl.rmRF(reportPOMFile, true);
+    tl.rmRF(targetDirectory);
+    tl.rmRF(reportDirectory);
+    tl.rmRF(reportPOMFile);
 
     var buildProps: { [key: string]: string } = {};
     buildProps['buildfile'] = mavenPOMFile;
@@ -419,6 +425,7 @@ function publishCodeCoverage(isCodeCoverageOpted: boolean): Q.Promise<boolean> {
             }
             mvnReport.line(mavenOptions);
             mvnReport.arg("verify");
+            mvnReport.arg("-Dmaven.test.skip=true"); // This argument added to skip tests to avoid running them twice. More about this argument: http://maven.apache.org/surefire/maven-surefire-plugin/examples/skipping-tests.html
             mvnReport.exec().then(function (code) {
                 publishCCToTfs();
                 defer.resolve(true);
